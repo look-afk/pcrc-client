@@ -48,9 +48,10 @@ Write-Host "  config.json created." -ForegroundColor Green
 
 # ── Ищем Python 3.12 ──────────────────────────────────────────────────────────
 $Py312 = $null
+$uvPython312 = Join-Path $env:LOCALAPPDATA "uv\python\cpython-3.12.13-windows-x86_64-none\python.exe"
 foreach ($candidate in @(
     "py -3.12",
-    "C:\Users\Zafar\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\python.exe"
+    $uvPython312
 )) {
     try {
         if ($candidate -like "*\*") {

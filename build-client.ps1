@@ -1,6 +1,8 @@
 ﻿# Сборка RemoteControl.exe + RemoteControlPanel.exe
 # Автоматически генерирует иконку через Python если её нет
-$ErrorActionPreference = "Stop"
+# Сборка PyInstaller пишет логи в stderr; при EAP=Stop захват потоков
+# прерывает скрипт на первой строке лога. Ошибки ловим через $LASTEXITCODE.
+$ErrorActionPreference = "Continue"
 $Root = $PSScriptRoot
 $venv = Join-Path $Root ".venv\Scripts"
 $python = Join-Path $venv "python.exe"
@@ -93,7 +95,6 @@ Write-Host "Building RemoteControl.exe (headless core)..." -ForegroundColor Yell
     --hidden-import=pyttsx3 `
     --hidden-import=PIL.ImageGrab `
     --collect-all pyttsx3 `
-    --add-data "config.json;." `
     (Join-Path $Root "client_final.py")
 
 if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -103,7 +104,6 @@ Write-Host "Building RemoteControlPanel.exe (GUI)..." -ForegroundColor Yellow
 & $pyi --noconfirm --clean --onefile --windowed `
     --name RemoteControlPanel `
     @IconArgs `
-    --add-data "config.json;." `
     (Join-Path $Root "gui_panel.py")
 
 if ($LASTEXITCODE -eq 0) {
@@ -128,30 +128,10 @@ if ($LASTEXITCODE -eq 0) {
     }
 
     # ── Создаём шаблон config.json для юзеров (без секрета) ──────────────────
+    # Всегда перезаписываем из config.example.json — в релиз не должен попасть
+    # ни реальный secret_key, ни старый локальный config.json
     $ReleaseCfg = Join-Path $Root "dist\config.json"
-    if (-not (Test-Path $ReleaseCfg)) {
-        @"
-{
-  "name": "",
-  "server_url": "https://remote-server-mr8v.onrender.com",
-  "secret_key": "ENTER_YOUR_KEY_HERE",
-  "update_url": "https://raw.githubusercontent.com/look-afk/pcrc-versions/main",
-  "voice": {
-    "enabled": true,
-    "language": "en-US",
-    "mic_index": null,
-    "timeout": 8,
-    "phrase_time_limit": 12,
-    "ambient_duration": 1.0,
-    "energy_threshold": null,
-    "pause_threshold": 0.8,
-    "dynamic_energy": true,
-    "tts_rate": 165,
-    "tts_voice_id": null
-  }
-}
-"@ | Set-Content $ReleaseCfg -Encoding UTF8
-    }
+    Copy-Item (Join-Path $Root "config.example.json") $ReleaseCfg -Force
 
     # ── Собираем zip для GitHub Release ───────────────────────────────────────
     Write-Host "Creating release zip..." -ForegroundColor Cyan
