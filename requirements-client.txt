@@ -1,0 +1,16 @@
+# Remote Control — зависимости клиента
+# Целевой Python: 3.12.x (Windows x64)
+# НЕ используйте Python 3.14 — нет wheels для pyaudio и др.
+
+websockets==14.2
+psutil==7.0.0
+pyautogui==0.9.54
+Pillow==11.1.0
+requests==2.32.3
+pyperclip==1.9.0
+SpeechRecognition==3.14.1
+pyttsx3==2.98
+pyaudio==0.2.14
+
+# Сборка exe (только на машине разработчика)
+pyinstaller==6.12.0

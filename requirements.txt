@@ -1,0 +1,2 @@
+# Use requirements-client.txt + requirements-server.txt
+# Run: .\setup.ps1

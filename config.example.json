@@ -1,0 +1,19 @@
+{
+  "name": "",
+  "server_url": "https://remote-server-mr8v.onrender.com",
+  "secret_key": "ENTER_YOUR_KEY_HERE",
+  "update_url": "https://raw.githubusercontent.com/look-afk/pcrc-versions/main",
+  "voice": {
+    "enabled": true,
+    "language": "en-US",
+    "mic_index": null,
+    "timeout": 8,
+    "phrase_time_limit": 12,
+    "ambient_duration": 1.0,
+    "energy_threshold": null,
+    "pause_threshold": 0.8,
+    "dynamic_energy": true,
+    "tts_rate": 165,
+    "tts_voice_id": null
+  }
+}

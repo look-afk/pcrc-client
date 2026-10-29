@@ -1,0 +1,5 @@
+# Remote Control — зависимости сервера
+# Целевой Python: 3.12.x
+
+aiohttp==3.11.12
+python-telegram-bot==21.11.1
