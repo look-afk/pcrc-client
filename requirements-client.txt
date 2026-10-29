@@ -11,6 +11,7 @@ pyperclip==1.9.0
 SpeechRecognition==3.14.1
 pyttsx3==2.98
 pyaudio==0.2.14
+cryptography==50.0.2
 
 # Сборка exe (только на машине разработчика)
 pyinstaller==6.12.0

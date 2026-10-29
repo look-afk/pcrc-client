@@ -1,4 +1,5 @@
 config.json
+.signing/
 .venv/
 dist/
 build/

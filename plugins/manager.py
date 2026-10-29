@@ -94,13 +94,24 @@ class PluginManager:
 
     # ── Установка по URL ──────────────────────────────────────────────────────
 
-    async def install(self, url: str) -> str:
-        """Скачать плагин по URL и загрузить его."""
+    async def install(self, url: str, sha256: str = "") -> str:
+        """Скачать плагин по URL, проверить sha256, загрузить."""
+        import hashlib
         import requests
+        url = url.strip()
+        sha256 = (sha256 or "").strip().lower()
+        if len(sha256) != 64 or any(c not in "0123456789abcdef" for c in sha256):
+            return ("Usage: plugin_install <url> <sha256>\n"
+                    "sha256 is REQUIRED (certutil -hashfile plugin.py SHA256).")
         try:
-            r = requests.get(url.strip(), timeout=15)
+            r = requests.get(url, timeout=15)
             if r.status_code != 200:
                 return f"Error: HTTP {r.status_code}"
+
+            actual = hashlib.sha256(r.content).hexdigest()
+            if actual != sha256:
+                return (f"Error: sha256 mismatch — expected {sha256}, "
+                        f"got {actual}. File NOT installed.")
 
             # Имя файла из URL
             fname = url.rstrip("/").split("/")[-1]

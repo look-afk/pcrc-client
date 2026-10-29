@@ -141,8 +141,15 @@ IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
 # ── Version ──
-CLIENT_VERSION   = 2
+CLIENT_VERSION   = 3
 DEFAULT_UPDATE_URL = ""
+
+# Ed25519-публичный ключ для подписи метаданных обновления (version.json "sig").
+# Приватный ключ: .signing/update_signing_private.pem (в .gitignore, НЕ коммитить).
+# Переподпись: python sign-version.py <version.json>
+UPDATE_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA2n9itFm+W9uWsAcrDJPhejecyNgXt2ZFTtpQwuVJM2Q=
+-----END PUBLIC KEY-----"""
 
 # ── Config ──
 DEFAULT_CFG = {
@@ -377,19 +384,49 @@ def _verify_sha256(data: bytes, expected: str) -> bool:
         return False
     return hashlib.sha256(data).hexdigest() == expected
 
+def _update_sig_canonical(d: dict) -> bytes:
+    """Каноничные байты метаданных для Ed25519-подписи.
+    Должна совпадать с sign-version.py: JSON всех полей кроме sig."""
+    d2 = {k: v for k, v in d.items() if k != "sig"}
+    return json.dumps(d2, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+def _verify_update_sig(d: dict, sig_b64: str) -> bool:
+    """Проверить Ed25519-подпись метаданных обновления (весь объект version.json)."""
+    try:
+        import base64
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        pub = serialization.load_pem_public_key(UPDATE_PUBLIC_KEY.encode())
+        if not isinstance(pub, Ed25519PublicKey):
+            return False
+        pub.verify(base64.b64decode(sig_b64.strip()), _update_sig_canonical(d))
+        return True
+    except Exception as e:
+        log.debug(f"Update signature check failed: {e}")
+        return False
+
 async def check_for_update():
     """
-    update_url examples:
-      - GitHub raw dir: https://raw.githubusercontent.com/USER/REPO/main
-                                                        -> GET {url}/version.json
+    update_url: https://raw.githubusercontent.com/USER/REPO/main -> GET {url}/version.json
+
     version.json shape:
-      {"version": 3, "url": "https://github.com/.../releases/download/v3/RemoteControl-release.zip",
-       "sha256": "<hex sha256 of that file>"}
-    Returns (version, download_url, sha256). sha256 may be "" if metadata has none.
+      {
+        "version": 5,
+        "url": ".../releases/download/v5/RemoteControl.exe",   # для СТАРЫХ клиентов (exe!)
+        "sha256": "<sha256 of exe>",
+        "zip_url": ".../releases/download/v5/RemoteControl-release.zip",  # для новых
+        "zip_sha256": "<sha256 of zip>",
+        "sig": "<base64 Ed25519 over canonical json without sig>"
+      }
+
+    Поле url ОБЯЗАНО заканчиваться .exe: старые клиенты не понимают zip
+    и сломались бы. Новые клиенты берут zip_url (если есть) — с plugins/.
+    sha256/sig обязательны — без них обновление не принимается.
+    Returns (version, download_url, sha256, sig).
     """
     url = CFG.get("update_url", "").strip()
     if not url:
-        return 0, "", ""
+        return 0, "", "", ""
     url = url.rstrip("/")
     candidates = [f"{url}/version.json", f"{url}/version"]
     for endpoint in candidates:
@@ -399,21 +436,34 @@ async def check_for_update():
                 continue
             d = r.json()
             ver = int(d.get("version", 0))
-            dl  = d.get("url", "")
-            sha = str(d.get("sha256", "") or "").strip().lower()
-            if ver > CLIENT_VERSION and dl:
-                return ver, dl, sha
-            return 0, "", ""
+            sig = str(d.get("sig", "") or "").strip()
+            if ver <= CLIENT_VERSION:
+                return 0, "", "", ""
+            if not d.get("url") and not d.get("zip_url"):
+                return 0, "", "", ""
+            if not sig or not _verify_update_sig(d, sig):
+                log.error(f"Update v{ver} rejected: missing/bad Ed25519 signature")
+                return 0, "", "", ""
+            if d.get("zip_url"):
+                dl = str(d["zip_url"]).strip()
+                sha = str(d.get("zip_sha256", "") or "").strip().lower()
+            else:
+                dl = str(d["url"]).strip()
+                sha = str(d.get("sha256", "") or "").strip().lower()
+            if not dl or not sha:
+                log.error(f"Update v{ver} rejected: no download url/sha256 in version.json")
+                return 0, "", "", ""
+            return ver, dl, sha, sig
         except Exception as e:
             log.debug(f"Update check {endpoint}: {e}")
             continue
-    return 0, "", ""
+    return 0, "", "", ""
 
 async def update_checker_loop():
     await asyncio.sleep(60)
     while True:
         try:
-            ver, url, sha = await check_for_update()
+            ver, url, sha, _sig = await check_for_update()
             if ver and url:
                 log.info(f"Update v{ver} available — downloading…")
                 r = requests.get(url, timeout=120)
@@ -431,7 +481,12 @@ async def update_checker_loop():
                         else:
                             _UPDATE_STAGED.write_bytes(r.content)
                         _UPDATE_VER_F.write_text(str(ver))
-                        log.info("Update staged — will apply on next restart")
+                        log.info(f"Update v{ver} staged — auto-applying in 60s")
+                        # Авто-применение: не ждём перезагрузки/ручной команды
+                        await asyncio.sleep(60)
+                        if apply_pending_update():
+                            os._exit(0)
+                        log.error("Update auto-apply failed — will retry next cycle")
         except Exception as e:
             log.debug(f"Update loop: {e}")
         await asyncio.sleep(1800)
@@ -1278,21 +1333,21 @@ async def cmd_version(p):
 async def cmd_check_update(p):
     url = CFG.get("update_url","").strip()
     if not url: return "No update_url in config.json"
-    ver, dl, sha = await check_for_update()
-    if not ver: return f"Already latest (v{CLIENT_VERSION})"
+    ver, dl, sha, sig = await check_for_update()
+    if not ver: return f"Already latest (v{CLIENT_VERSION}) or update metadata rejected (check sha256+sig in version.json)"
     try:
         r = requests.get(dl, timeout=60)
         if r.status_code != 200:
             return f"Download failed: HTTP {r.status_code}"
         if not _verify_sha256(r.content, sha):
             return (f"Update v{ver} REJECTED: sha256 mismatch "
-                    f"(metadata: {sha or 'MISSING'} — add sha256 to version.json)")
+                    f"(metadata: {sha} — check version.json)")
         if dl.endswith(".zip"):
             _UPDATE_ZIP.write_bytes(r.content)
         else:
             _UPDATE_STAGED.write_bytes(r.content)
         _UPDATE_VER_F.write_text(str(ver))
-        return f"Update v{ver} downloaded and verified. Send: restart_update to apply"
+        return f"Update v{ver} downloaded, verified (sha256 + Ed25519). Send: restart_update to apply"
     except Exception as e: return f"Download error: {e}"
 
 async def cmd_restart_update(p):
@@ -1498,9 +1553,13 @@ async def cmd_plugins_list(p: str) -> str:
 async def cmd_plugin_install(p: str) -> str:
     if not _PLUGINS_AVAILABLE or not plugin_manager:
         return "Plugin system not available."
-    if not p:
-        return "Usage: plugin_install <url>"
-    return await plugin_manager.install(p)
+    parts = (p or "").split()
+    if len(parts) != 2:
+        return ("Usage: plugin_install <url> <sha256>\n"
+                "sha256 is REQUIRED. Get it from the plugin author, verify the file "
+                "yourself first (certutil -hashfile plugin.py SHA256).")
+    url, sha = parts[0], parts[1]
+    return await plugin_manager.install(url, sha)
 
 async def cmd_plugin_unload(p: str) -> str:
     if not _PLUGINS_AVAILABLE or not plugin_manager:
