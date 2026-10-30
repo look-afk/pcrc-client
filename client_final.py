@@ -310,6 +310,10 @@ def _upload(file_data: bytes, filename: str = "file.bin") -> str:
 _UPDATE_STAGED  = _LOG_DIR / "pending_update.exe"
 _UPDATE_ZIP     = _LOG_DIR / "pending_update.zip"
 _UPDATE_VER_F   = _LOG_DIR / "pending_version.txt"
+_UPDATE_ROLLBACK_EXE = _LOG_DIR / "rollback.exe"
+_UPDATE_ROLLBACK_VER = _LOG_DIR / "rollback_version.txt"
+_UPDATE_APPLIED_FLAG = _LOG_DIR / "update_applied.flag"
+_UPDATE_CRASH_COUNT  = _LOG_DIR / "update_crash_count.txt"
 
 def apply_pending_update() -> bool:
     """Apply staged update. Supports both .exe and .zip releases."""
@@ -324,6 +328,26 @@ def apply_pending_update() -> bool:
     try:
         exe = Path(sys.executable)
         exe_dir = exe.parent
+
+        # FIX: back up the exe that is about to be replaced, and record the
+        # version we are upgrading FROM, so a broken update can be rolled
+        # back automatically instead of leaving the machine on a dead build.
+        try:
+            shutil.copy2(exe, _UPDATE_ROLLBACK_EXE)
+            _UPDATE_ROLLBACK_VER.write_text(str(CLIENT_VERSION))
+            log.info(f"Backed up current exe (v{CLIENT_VERSION}) before applying update")
+        except Exception as e:
+            log.error(f"Could not back up current exe before update — aborting update for safety: {e}")
+            return False
+
+        pending_version = _UPDATE_VER_F.read_text().strip() if _UPDATE_VER_F.exists() else "?"
+        _UPDATE_APPLIED_FLAG.write_text(json.dumps({
+            "from_version": CLIENT_VERSION,
+            "to_version": pending_version,
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+        }))
+        _UPDATE_CRASH_COUNT.write_text("0")
+
         bat_lines = [
             "@echo off",
             "timeout /t 2 /nobreak >nul",
@@ -375,6 +399,74 @@ def apply_pending_update() -> bool:
     except Exception as e:
         log.error(f"Apply update: {e}")
         return False
+
+
+def rollback_to_previous_version(reason: str) -> bool:
+    """
+    FIX: counterpart to apply_pending_update's new backup step. Restores the
+    exe that was running before the last update and restarts into it. Used
+    both by the post-update connectivity check and by the watchdog's
+    crash-loop detector in main().
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    if not _UPDATE_ROLLBACK_EXE.exists():
+        log.error(f"Rollback requested ({reason}) but no rollback.exe is available")
+        return False
+    try:
+        exe = Path(sys.executable)
+        rollback_ver = _UPDATE_ROLLBACK_VER.read_text().strip() if _UPDATE_ROLLBACK_VER.exists() else "previous"
+        log.error(f"Rolling back to v{rollback_ver} — reason: {reason}")
+        bat_lines = [
+            "@echo off",
+            "timeout /t 2 /nobreak >nul",
+            f'taskkill /IM "{exe.name}" /F >nul 2>&1',
+            "timeout /t 2 /nobreak >nul",
+            f'copy /Y "{_UPDATE_ROLLBACK_EXE}" "{exe}" >nul',
+            f'del /f /q "{_UPDATE_APPLIED_FLAG}" >nul 2>&1',
+            f'del /f /q "{_UPDATE_CRASH_COUNT}" >nul 2>&1',
+            f'start "" "{exe}"',
+            'del /f /q "%~f0"',
+        ]
+        bat = Path(tempfile.gettempdir()) / "rc_rollback.bat"
+        bat.write_text("\n".join(bat_lines), encoding="utf-8")
+        subprocess.Popen(
+            f'start "" /b cmd /c "{bat}"',
+            shell=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WIN else 0,
+        )
+        return True
+    except Exception as e:
+        log.error(f"Rollback failed: {e}")
+        return False
+
+
+async def post_update_watchdog(stop_evt: threading.Event, timeout_secs: int = 90) -> None:
+    """
+    FIX: runs only right after an update was applied (update_applied.flag
+    present). If the client has not successfully registered with the server
+    within `timeout_secs`, assume the new build is broken and roll back
+    automatically, instead of silently staying disconnected forever.
+    """
+    if not _UPDATE_APPLIED_FLAG.exists():
+        return
+    log.info(f"Post-update watchdog: must connect within {timeout_secs}s or we roll back")
+    waited = 0
+    while waited < timeout_secs:
+        if stop_evt.is_set():
+            return
+        if _ws_connected:
+            log.info("Post-update watchdog: connected successfully — keeping this version")
+            _UPDATE_APPLIED_FLAG.unlink(missing_ok=True)
+            _UPDATE_CRASH_COUNT.unlink(missing_ok=True)
+            # Rollback copy is no longer needed once the new version is confirmed good.
+            _UPDATE_ROLLBACK_EXE.unlink(missing_ok=True)
+            _UPDATE_ROLLBACK_VER.unlink(missing_ok=True)
+            return
+        await asyncio.sleep(2)
+        waited += 2
+    if rollback_to_previous_version(f"could not connect to server within {timeout_secs}s after update"):
+        os._exit(1)
 
 def _verify_sha256(data: bytes, expected: str) -> bool:
     """Проверить sha256 скачанного файла. expected — hex из version.json."""
@@ -2240,10 +2332,12 @@ def _worker_main():
             if loaded:
                 log.info(f"Plugins ready: {', '.join(loaded)}")
         ipc_t = asyncio.create_task(ipc_server_loop())
+        pw_t  = asyncio.create_task(post_update_watchdog(stop_evt))
         try:
             await ws_loop(stop_evt)
         finally:
             ipc_t.cancel()
+            pw_t.cancel()
 
     try:
         asyncio.run(_run_all())
@@ -2264,15 +2358,38 @@ def main():
     if getattr(sys, "frozen", False):
         # Running as .exe — use watchdog
         log.info("Watchdog started")
+        crash_streak = 0
         while True:
+            start_t = _time.time()
             p = multiprocessing.Process(target=_worker_main, daemon=False)
             p.start()
             log.info(f"Worker PID: {p.pid}")
             p.join()
             code = p.exitcode
+            elapsed = _time.time() - start_t
+
             if code == 0:
                 log.info("Worker exited cleanly — stopping")
                 break
+
+            # FIX: if we are in the middle of an update (update_applied.flag
+            # present) and the new worker keeps dying within seconds of
+            # starting, the new build is broken in a way that never even
+            # reaches the normal post_update_watchdog connectivity check
+            # (e.g. it crashes before asyncio starts). Detect that crash
+            # loop here and roll back instead of restarting forever.
+            if _UPDATE_APPLIED_FLAG.exists() and elapsed < 15:
+                crash_streak += 1
+                log.warning(f"Worker crashed {elapsed:.1f}s after start (code {code}), "
+                            f"crash_streak={crash_streak}")
+                if crash_streak >= 3:
+                    log.error("Repeated immediate crashes right after an update — rolling back")
+                    if rollback_to_previous_version("repeated crash-on-start after update"):
+                        break
+                    crash_streak = 0
+            else:
+                crash_streak = 0
+
             log.warning(f"Worker exited (code {code}) — restarting in 3s")
             _time.sleep(3)
     else:
