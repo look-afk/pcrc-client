@@ -103,10 +103,45 @@ class IPCClient:
                 return
 
 
+def _not_configured_dialog():
+    """
+    FIX: this process is built with --windowed (no console), so the old
+    print()+sys.exit(1) was invisible — the panel just vanished with no
+    explanation. RemoteControl.exe (the headless core) is the one that
+    performs first-run setup (asks for name + secret_key) and writes
+    config.json; if someone opens the Panel exe before that has happened,
+    show them an actual window telling them what to do instead of silently
+    closing.
+    """
+    import tkinter as tk
+    root = tk.Tk()
+    root.title("Remote Control Panel")
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+    w, h = 420, 170
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+    root.configure(bg="#0d1117")
+    tk.Label(root, text="Not set up yet", bg="#0d1117", fg="#f85149",
+             font=("Segoe UI", 12, "bold")).pack(pady=(20, 6))
+    tk.Label(
+        root,
+        text="Run RemoteControl.exe first — it will ask for this PC's\n"
+             "name and the server's secret key, and only then can\n"
+             "the panel connect to it.",
+        bg="#0d1117", fg="#e6edf3", font=("Segoe UI", 9), justify="center",
+    ).pack(pady=(0, 16))
+    tk.Button(root, text="OK", command=root.destroy,
+              bg="#58a6ff", fg="#0d1117", relief="flat",
+              font=("Segoe UI", 10, "bold"), padx=16, pady=5,
+              cursor="hand2").pack()
+    root.mainloop()
+
+
 def main():
     cf.CFG = cf.load_config()
-    if not cf.CFG.get("secret_key"):
-        print("config.json: secret_key пуст — панель не сможет авторизоваться у воркера.")
+    if not cf.CFG.get("secret_key") or not cf.CFG.get("name"):
+        _not_configured_dialog()
         sys.exit(1)
 
     cmd_q = _queue.Queue()

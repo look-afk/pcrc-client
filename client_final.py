@@ -141,7 +141,7 @@ IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
 # ── Version ──
-CLIENT_VERSION   = 5
+CLIENT_VERSION   = 4
 DEFAULT_UPDATE_URL = ""
 
 # Ed25519-публичный ключ для подписи метаданных обновления (version.json "sig").
@@ -193,16 +193,15 @@ def normalize_ws_url(url: str) -> str:
         url += "/ws"
     return url
 
-def ask_name_once():
-    """Show a nice popup to ask for PC name."""
-    result = {"name": ""}
-    def submit():
-        v = entry.get().strip()
-        if v:
-            result["name"] = v
-            root.destroy()
-        else:
-            entry.config(highlightbackground="red", highlightthickness=2)
+def ask_setup_once(need_name: bool, need_secret: bool) -> dict:
+    """
+    First-run popup. Shows only the fields actually missing from config.json:
+    PC name and/or the secret_key the server expects. Lets a freshly
+    downloaded exe be fully configured without hand-editing config.json —
+    the person just needs the server's secret_key and a name for this PC.
+    Returns {"name": "...", "secret_key": "..."} (only the keys that were asked for).
+    """
+    result = {}
 
     root = tk.Tk()
     root.title("Remote Control — Setup")
@@ -210,7 +209,8 @@ def ask_name_once():
     root.attributes("-topmost", True)
     root.lift()
     root.focus_force()
-    w, h = 380, 170
+    rows = (1 if need_name else 0) + (1 if need_secret else 0)
+    w, h = 400, 150 + rows * 70
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
     root.configure(bg="#0d1117")
@@ -218,26 +218,64 @@ def ask_name_once():
     tk.Label(root, text="Remote Control — First Setup",
              bg="#0d1117", fg="#e6edf3",
              font=("Segoe UI", 12, "bold")).pack(pady=(18, 4))
-    tk.Label(root, text="Enter a name for this PC  (e.g.  home_pc,  office_laptop)",
+    tk.Label(root, text="This only needs to be filled in once.",
              bg="#0d1117", fg="#8b949e",
-             font=("Segoe UI", 9)).pack()
+             font=("Segoe UI", 9)).pack(pady=(0, 6))
 
-    entry = tk.Entry(root, width=30, bg="#161b22", fg="#e6edf3",
-                     insertbackground="#e6edf3", relief="flat",
-                     font=("Segoe UI", 11),
-                     highlightthickness=1, highlightbackground="#30363d")
-    entry.pack(pady=10, ipady=5)
-    entry.focus_set()
-    entry.bind("<Return>", lambda e: submit())
+    name_entry = None
+    secret_entry = None
+
+    if need_name:
+        tk.Label(root, text="Name for this PC  (e.g.  home_pc,  office_laptop)",
+                 bg="#0d1117", fg="#8b949e", font=("Segoe UI", 9)).pack(pady=(6, 0))
+        name_entry = tk.Entry(root, width=34, bg="#161b22", fg="#e6edf3",
+                               insertbackground="#e6edf3", relief="flat",
+                               font=("Segoe UI", 11),
+                               highlightthickness=1, highlightbackground="#30363d")
+        name_entry.pack(pady=(4, 0), ipady=5)
+
+    if need_secret:
+        tk.Label(root, text="Secret key  (get this from whoever runs your server)",
+                 bg="#0d1117", fg="#8b949e", font=("Segoe UI", 9)).pack(pady=(14, 0))
+        secret_entry = tk.Entry(root, width=34, bg="#161b22", fg="#e6edf3",
+                                 insertbackground="#e6edf3", relief="flat",
+                                 font=("Segoe UI", 11), show="*",
+                                 highlightthickness=1, highlightbackground="#30363d")
+        secret_entry.pack(pady=(4, 0), ipady=5)
+
+    err_label = tk.Label(root, text="", bg="#0d1117", fg="#f85149", font=("Segoe UI", 8))
+    err_label.pack(pady=(6, 0))
+
+    def submit():
+        name_val = name_entry.get().strip() if name_entry else ""
+        secret_val = secret_entry.get().strip() if secret_entry else ""
+        if need_name and not name_val:
+            err_label.config(text="Please enter a name for this PC")
+            return
+        if need_secret and not secret_val:
+            err_label.config(text="Please enter the secret key")
+            return
+        if need_name:
+            result["name"] = name_val
+        if need_secret:
+            result["secret_key"] = secret_val
+        root.destroy()
+
+    first_entry = name_entry or secret_entry
+    if first_entry:
+        first_entry.focus_set()
+    for e in (name_entry, secret_entry):
+        if e is not None:
+            e.bind("<Return>", lambda _ev: submit())
 
     tk.Button(root, text="Save & Start", command=submit,
               bg="#58a6ff", fg="#0d1117", relief="flat",
               font=("Segoe UI", 10, "bold"),
-              padx=16, pady=5, cursor="hand2").pack()
+              padx=16, pady=5, cursor="hand2").pack(pady=14)
 
     root.protocol("WM_DELETE_WINDOW", lambda: None)
     root.mainloop()
-    return result["name"]
+    return result
 
 # ── Globals set at runtime ──
 CFG          = {}
@@ -1328,8 +1366,15 @@ async def cmd_empty_recycle(p):
     return "Recycle bin emptied"
 
 # 15. STARTUP
-async def cmd_add_startup(p):
-    if not IS_WIN: return "Windows only"
+def _register_startup_shortcut() -> tuple[bool, str]:
+    """
+    Create a Startup-folder shortcut pointing at the running exe, so the
+    client survives a reboot instead of silently stopping and becoming hard
+    to find among files. Shared by cmd_add_startup (manual, via remote
+    command) and the automatic first-run setup in _worker_main.
+    """
+    if not IS_WIN:
+        return False, "Windows only"
     try:
         exe     = Path(sys.executable).resolve()
         workdir = exe.parent
@@ -1344,10 +1389,15 @@ async def cmd_add_startup(p):
             f'$SC.Save()\n',
             encoding="utf-8"
         )
-        result = run(f'powershell -NoProfile -ExecutionPolicy Bypass -File "{ps1}"')
+        run(f'powershell -NoProfile -ExecutionPolicy Bypass -File "{ps1}"')
         ps1.unlink(missing_ok=True)
-        return f"Added to startup:\n  {startup}\n  Target: {exe}"
-    except Exception as e: return f"Error: {e}"
+        return True, f"Added to startup:\n  {startup}\n  Target: {exe}"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+async def cmd_add_startup(p):
+    ok, msg = _register_startup_shortcut()
+    return msg
 
 async def cmd_remove_startup(p):
     if not IS_WIN: return "Windows only"
@@ -2306,15 +2356,38 @@ def _worker_main():
         os._exit(0)
 
     CFG = load_config()
-    if not CFG.get("name"):
-        name = ask_name_once() or f"pc_{socket.gethostname()}"
-        CFG["name"] = name
+    need_name   = not CFG.get("name")
+    need_secret = not CFG.get("secret_key")
+    first_run   = need_name or need_secret
+
+    if first_run:
+        answers = ask_setup_once(need_name, need_secret)
+        if need_name:
+            CFG["name"] = answers.get("name") or f"pc_{socket.gethostname()}"
+        if need_secret:
+            # If the person closed the dialog without entering one, fail loudly
+            # instead of silently starting with an empty secret (which the
+            # server would reject anyway).
+            if not answers.get("secret_key"):
+                log.error("FATAL: no secret_key entered at setup — cannot start")
+                sys.exit(1)
+            CFG["secret_key"] = answers["secret_key"]
         save_config(CFG)
-        log.info(f"PC name saved: {name}")
+        log.info(f"Setup complete: name='{CFG['name']}'")
+
     if not CFG.get("secret_key"):
         log.error("FATAL: secret_key is empty in config.json — set it before running")
         sys.exit(1)
     log.info(f"Starting v{CLIENT_VERSION} as '{CFG['name']}' — {len(COMMANDS)} commands")
+
+    # Register in Startup once, right after the first successful setup, so the
+    # client survives a reboot. Guarded by a flag so we don't re-run the
+    # PowerShell shortcut creation on every single launch.
+    if first_run and IS_WIN and not CFG.get("_autostart_registered"):
+        ok, msg = _register_startup_shortcut()
+        CFG["_autostart_registered"] = bool(ok)
+        save_config(CFG)
+        log.info(f"Autostart: {msg}")
 
     global voice_engine
     voice_engine = VoiceEngine(CFG)
