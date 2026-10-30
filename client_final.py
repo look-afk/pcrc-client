@@ -141,7 +141,7 @@ IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
 # ── Version ──
-CLIENT_VERSION   = 4
+CLIENT_VERSION   = 5
 DEFAULT_UPDATE_URL = ""
 
 # Ed25519-публичный ключ для подписи метаданных обновления (version.json "sig").
