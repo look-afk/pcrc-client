@@ -141,7 +141,7 @@ IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
 # ── Version ──
-CLIENT_VERSION   = 6
+CLIENT_VERSION   = 4
 DEFAULT_UPDATE_URL = ""
 
 # Ed25519-публичный ключ для подписи метаданных обновления (version.json "sig").
@@ -175,9 +175,19 @@ DEFAULT_CFG = {
 def load_config():
     if CONFIG_FILE.exists():
         try:
-            return {**DEFAULT_CFG, **json.loads(CONFIG_FILE.read_text(encoding="utf-8"))}
-        except Exception:
-            pass
+            # FIX: "utf-8-sig" strips a leading UTF-8 BOM if present (e.g. a
+            # config.json written by Windows PowerShell's -Encoding UTF8,
+            # which always adds one) and behaves exactly like "utf-8" when
+            # there is no BOM. Plain "utf-8" previously made json.loads()
+            # throw on a BOM'd file, which was silently swallowed below —
+            # the client would then think config.json didn't exist at all
+            # and re-ask for name/secret_key that were, in fact, right there.
+            text = CONFIG_FILE.read_text(encoding="utf-8-sig")
+            return {**DEFAULT_CFG, **json.loads(text)}
+        except Exception as e:
+            # FIX: never swallow this silently again — a broken config.json
+            # now logs loudly instead of quietly resetting to defaults.
+            log.error(f"Could not parse {CONFIG_FILE}: {e} — falling back to defaults")
     return DEFAULT_CFG.copy()
 
 def save_config(cfg):
