@@ -320,17 +320,45 @@ def ps(cmd, timeout=30):
     )
 
 def _upload(file_data: bytes, filename: str = "file.bin") -> str:
-    # Method 1 — file.io
+    """
+    Upload a file and return a download URL.
+    Priority: own PCRC server (/upload endpoint, data stays on your infra)
+    → fallback to anonymous third-party hosts only when the server is unreachable.
+    The /upload endpoint on the server auto-deletes files after the first
+    download or after 15 minutes, whichever comes first.
+    """
+    # Method 1 — own server (preferred: no data leaves your infrastructure)
+    try:
+        base = (CFG.get("server_url") or "").strip().rstrip("/")
+        if base.startswith("wss://"):
+            base = "https://" + base[6:]
+        elif base.startswith("ws://"):
+            base = "http://" + base[5:]
+        if base.endswith("/ws"):
+            base = base[:-3]
+        if base:
+            r = requests.post(
+                f"{base}/upload",
+                files={"file": (filename, file_data)},
+                headers={"X-Secret": CFG.get("secret_key", "")},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                url = r.json().get("url", "")
+                if url:
+                    log.debug(f"Uploaded via own server: {url}")
+                    return url
+    except Exception as e:
+        log.debug(f"own server upload: {e}")
+    # Method 2 — file.io (fallback, third-party)
     try:
         r = requests.post("https://file.io/?expires=1d",
                           files={"file": (filename, file_data)}, timeout=30)
-        if r.status_code == 200:
-            d = r.json()
-            if d.get("success"):
-                return d["link"]
+        if r.status_code == 200 and r.json().get("success"):
+            return r.json()["link"]
     except Exception as e:
         log.debug(f"file.io: {e}")
-    # Method 2 — 0x0.st
+    # Method 3 — 0x0.st
     try:
         r = requests.post("https://0x0.st",
                           files={"file": (filename, file_data)}, timeout=30)
@@ -338,7 +366,7 @@ def _upload(file_data: bytes, filename: str = "file.bin") -> str:
             return r.text.strip()
     except Exception as e:
         log.debug(f"0x0.st: {e}")
-    # Method 3 — transfer.sh
+    # Method 4 — transfer.sh (last resort)
     try:
         r = requests.put(
             f"https://transfer.sh/{filename}",
