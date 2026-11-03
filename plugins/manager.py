@@ -7,13 +7,18 @@ import asyncio
 import importlib
 import importlib.util
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import unquote, urlparse
 
 from plugins._base import PluginBase
 
 log = logging.getLogger("rc.plugins")
+
+# Допустимое имя файла плагина: без путей, без «..», не начинается с «_».
+_SAFE_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.py")
 
 def _get_plugins_dir() -> Path:
     """Найти папку plugins/ рядом с exe (frozen) или рядом с этим файлом (dev)."""
@@ -77,8 +82,12 @@ class PluginManager:
             await instance.on_load()
             self._plugins[instance.NAME] = instance
 
-            # Зарегистрировать команды
+            # Зарегистрировать команды. Чужую команду не перехватываем: первый плагин остаётся владельцем.
             for cmd in instance.COMMANDS:
+                owner = self._cmd_map.get(cmd)
+                if owner and owner != instance.NAME:
+                    log.warning(f"Plugin {instance.NAME}: command '{cmd}' is already provided by '{owner}' — skipped")
+                    continue
                 self._cmd_map[cmd] = instance.NAME
 
             # Зарегистрировать голосовые триггеры
@@ -113,12 +122,13 @@ class PluginManager:
                 return (f"Error: sha256 mismatch — expected {sha256}, "
                         f"got {actual}. File NOT installed.")
 
-            # Имя файла из URL
-            fname = url.rstrip("/").split("/")[-1]
+            # Имя файла — из пути URL (без ?query и #fragment), только безопасные символы
+            fname = Path(unquote(urlparse(url).path)).name
             if not fname.endswith(".py"):
                 fname += ".py"
-            if fname.startswith("_"):
-                return "Error: plugin filename cannot start with _"
+            if not _SAFE_FILENAME.fullmatch(fname):
+                return ("Error: invalid plugin filename. Allowed: letters, digits, _ . - ; "
+                        "must not start with _ and must not contain a path.")
 
             dest = PLUGINS_DIR / fname
             dest.write_bytes(r.content)

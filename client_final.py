@@ -2446,7 +2446,32 @@ def _worker_main():
     except Exception as e:
         log.error(f"Fatal worker error: {e}")
         raise  # non-zero exit → watchdog restarts us
+        """
+        # Как применить
 
+## pcrc-plugins (каталог)
+```
+git checkout -b fix/plugin-hardening
+cp -r pcrc-fixes/pcrc-plugins/* .          # из корня репозитория
+git rm plugins/plugin_sandbox.py           # заменён на plugin_audit.py
+python tools/build_index.py                # должно закончиться без ✗
+git add -A && git commit -m "Harden plugins and validator" && git push -u origin fix/plugin-hardening
+```
+Дальше — Pull Request на GitHub: CI соберёт index.json и покажет ошибки до слияния.
+
+## pcrc-client (менеджер плагинов)
+```
+git checkout -b fix/plugin-manager
+cp pcrc-fixes/pcrc-client/plugins/manager.py plugins/manager.py
+git add -A && git commit -m "plugin_install: safe filename, no command hijack" && git push -u origin fix/plugin-manager
+```
+Правка вступит в силу только после новой сборки exe и публикации версии в pcrc-versions.
+
+## Если плагины уже писали данные рядом с собой
+Файлы `workflow_builder_data.json`, `smart_scheduler_tasks.json`, `command_studio_presets.json`, `event_bus_events.json`
+из папки plugins/ на ПК нужно один раз перенести в `%APPDATA%\PCRC\plugin_data\`.
+
+        """
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  WATCHDOG + ENTRY POINT
